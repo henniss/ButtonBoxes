@@ -1,41 +1,78 @@
 #include <stdint.h>
+#include <stdarg.h>
+
+#include <Key.h>
+#include <Keypad.h>
+#include <Joystick.h>
 #include <Wire.h>
 
-// This provides a minimal i2c debugging environment.
-#define ADDR 0b1001000
+// If >0, output debug info to Serial, and do not act as a joystick.
+#define DEBUG 1
 
+// ADS1115 specific codes.
+// Assuming ADDR wired to GND... adjust as needed.
+#define ADDR 0b1001000
 #define REG_CONV 0b00
 #define REG_CONFIG 0b01
 
-// uint8_t -> char
-#define cton(n) \
-  ( n & 0b100 ? (n & 0b010 ? (n & 0b001 ? '7' : '6') : (n & 0b001 ? '5' : '4') ) : (n & 0b010 ? (n & 0b001 ? '3' : '2') : (n & 0b001 ? '1' : '0') ))
-
-
+// Forward Declarations.
+// Wouldn't normally be necessary, but arduino's IDE seems to sometimes insert these in the wrong place.
 typedef uint8_t error_t;
-
 typedef struct {
   uint8_t addr, mask;
   uint16_t config;
   int16_t a[4];
 } ads1115_state;
 
-ads1115_state adc;
+void dprintf(const char *format, ...);
+
+error_t read_config(ads1115_state *adc);
+// Split the config word on sections into a null-terminated string.
+const char* bitConfigz(const ads1115_state *adc);
+// Parse the config word into a null-terminated string.
+const char* humanConfigz(const ads1115_state *adc);
+error_t readAdc(ads1115_state *adc, uint8_t idx);
+error_t readAll(ads1115_state *adc);
+
+// Begin Definitions.
+
+// Serial debugging IO
+#define SERIAL_BUF_LEN 128
+void dprintf(const char * format, ...) {
+#if DEBUG
+  // Making this static so memory-exhaustion happens at compile time.
+  static char serial_buf[SERIAL_BUF_LEN];
+  va_list args;
+  va_start (args, format);
+  vsnprintf(serial_buf, SERIAL_BUF_LEN, format, args);
+  Serial.println(serial_buf);
+  va_end(args);
+#else
+#endif
+}
+
+// ADC section.
+// global state.
+ads1115_state adc {.addr = ADDR, .mask = 0b0011};
+
+// nibble -> char
+#define ntoc(n) \
+  ( n & 0b100 ? (n & 0b010 ? (n & 0b001 ? '7' : '6') : (n & 0b001 ? '5' : '4') ) : (n & 0b010 ? (n & 0b001 ? '3' : '2') : (n & 0b001 ? '1' : '0') ))
 
 // Loads the configuration presently on the device, setting adc->config
 error_t read_config(ads1115_state *adc) {
   error_t err;
   if (adc == NULL) {
-    Serial.println("read_config(): NULL pointer");
+    dprintf("read_config(): NULL pointer");
     return 1;
   }
 
-  // Transmit i2c address; register;
+  // Transmit i2c address, register;
   Wire.beginTransmission(adc->addr);
   Wire.write(REG_CONFIG);
   err = Wire.endTransmission(adc->addr);
   if (err != 0) {
-    label("Wire.endTransmission()", err);
+    dprintf("Wire.endTransmission(): %d", err);
     return err;
   }
   // Request 2 bytes, then read them or fail.
@@ -46,14 +83,16 @@ error_t read_config(ads1115_state *adc) {
     adc->config |= Wire.read();
   }
   else {
-    Serial.println("read_config(): wire not available.");
+    dprintf("read_config(): wire not available.");
     return 2;
   }
   return 0;
 }
 
+// DEBUG only.
 // Split the config word on sections into a null-terminated string.
-char* bitConfigz(const ads1115_state *adc) {
+const char* bitConfigz(const ads1115_state *adc) {
+#if DEBUG
   static char buf[26];
   uint8_t wh = 0;
   for (int8_t i = 15; i >= 0; --i) {
@@ -83,10 +122,15 @@ char* bitConfigz(const ads1115_state *adc) {
   }
 ret:
   return buf;
+#else
+  return "";
+#endif
 }
 
+// DEBUG only.
 // Parse the config word into a null-terminated string.
-char* humanConfigz(const ads1115_state *adc) {
+const char* humanConfigz(const ads1115_state *adc) {
+#if DEBUG
   static char buf[26];
   char scratch[16];
   uint8_t wh = 0, val = 0, b = 0;
@@ -102,12 +146,12 @@ char* humanConfigz(const ads1115_state *adc) {
         if (val & 0b100) {
           // Absolute
           buf[wh++] = 'A';
-          buf[wh++] = cton(val & 0b011);
+          buf[wh++] = ntoc(val & 0b011);
           buf[wh++] = 'G';
         }
         else if (val) {
           buf[wh++] = 'D';
-          buf[wh++] = cton((val & 0b011) - 1);
+          buf[wh++] = ntoc((val & 0b011) - 1);
           buf[wh++] = '3';
         }
         else {
@@ -197,20 +241,17 @@ done:
 ret:
   buf[wh] = '\0';
   return buf;
+#else
+  return "";
+#endif
 }
 
-
-void label(const char *prefix, unsigned int i) {
-  Serial.print(prefix);
-  Serial.print(": ");
-  Serial.println(i);
-}
 
 error_t readAdc(ads1115_state *adc, uint8_t idx) {
   uint16_t config;
   error_t err;
   if (adc == NULL) {
-    Serial.println("read_adc(): NULL pointer");
+    dprintf("read_adc(): NULL pointer");
     return 1;
   }
   // Clamp to 0-3
@@ -230,12 +271,12 @@ error_t readAdc(ads1115_state *adc, uint8_t idx) {
   config |= (0b1 << 14);
   config |= (idx << 12);
 
-  
+
   // Zero out PGA config.
   config &= ~(0b111 << 9);
   // Drop gain.
   config |= (0b001 << 9);
-  
+
   Wire.beginTransmission(adc->addr);
   Wire.write(byte(REG_CONFIG));
   // Write with conversion bit set.
@@ -243,7 +284,7 @@ error_t readAdc(ads1115_state *adc, uint8_t idx) {
   Wire.write(byte(config & 0xff));
   err = Wire.endTransmission(adc->addr);
   if (err != 0) {
-    label("Wire.endTransmission(): couldn't write config.", err);
+    dprintf("Wire.endTransmission(): couldn't write config: %d", err);
     return err;
   }
   adc->config = config;
@@ -255,7 +296,7 @@ error_t readAdc(ads1115_state *adc, uint8_t idx) {
   Wire.write(REG_CONV);
   err = Wire.endTransmission(adc->addr);
   if (err != 0) {
-    label("Wire.endTransmission(): couldn't read conversion.", err);
+    dprintf("Wire.endTransmission(): couldn't read conversion: %d", err);
     return err;
   }
   Wire.requestFrom(adc->addr, byte(2));
@@ -265,23 +306,23 @@ error_t readAdc(ads1115_state *adc, uint8_t idx) {
     adc->a[idx] |= Wire.read();
   }
   else {
-    Serial.println("readAdc(): wire not available.");
+    dprintf("readAdc(): wire not available.");
     return 2;
   }
 
   return 0;
 }
 
-error_t readAll(ads1115_state *adc){
+error_t readAll(ads1115_state *adc) {
   error_t err;
-  if (adc == NULL){
-    Serial.println("readAll(): NULL pointer");
+  if (adc == NULL) {
+    dprintf("readAll(): NULL pointer");
     return 1;
   }
 
-  for (uint8_t idx = 0; idx < 4; ++idx){
+  for (uint8_t idx = 0; idx < 4; ++idx) {
     err = readAdc(adc, idx);
-    if (err != 0){
+    if (err != 0) {
       return err;
     }
   }
@@ -292,36 +333,32 @@ void setup() {
   delay(4000);
   uint8_t err;
   uint16_t config, dat;
-  adc.addr = ADDR;
-  adc.mask = 0b0011;
-  Serial.println("Reading config...");
+
+  dprintf("Reading config...");
   err = read_config(&adc);
   if (err != 0) {
     return;
   }
-  Serial.println(bitConfigz(&adc));
-  Serial.println(humanConfigz(&adc));
+  dprintf(bitConfigz(&adc));
+  dprintf(humanConfigz(&adc));
 
   err = readAll(&adc);
-  if (err != 0){
+  if (err != 0) {
     err = read_config(&adc);
-    if (err != 0){
+    if (err != 0) {
       return;
     }
     // We'd like to see what config is set to, in this case...
   }
 
-  for (uint8_t i = 0; i < 4; ++i){
-    Serial.print("A");
-    Serial.print(i);
-    Serial.print(": ");
-    Serial.println(adc.a[i]);
+  for (uint8_t i = 0; i < 4; ++i) {
+    dprintf("A%d:%d", i, adc.a[i]);
   }
 
-  Serial.println(bitConfigz(&adc));
-  Serial.println(humanConfigz(&adc));
-  
-  Serial.println("done");
+  dprintf(bitConfigz(&adc));
+  dprintf(humanConfigz(&adc));
+
+  dprintf("done");
 }
 
 void loop() {}
