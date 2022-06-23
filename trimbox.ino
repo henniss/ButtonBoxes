@@ -21,6 +21,10 @@
 #define WINDOW_H (WINDOW_SIZE ? (0b1 << (WINDOW_SIZE - 1)) : 0)
 #define WINDOW_L (WINDOW_SIZE ? (-WINDOW_H + 1) : 0)
 
+// Matrix specific defines.
+#define MAT_W 0x3
+#define MAT_H 0x3
+
 // Forward Declarations.
 // Wouldn't normally be necessary, but arduino's IDE seems to sometimes insert these in the wrong place.
 typedef uint8_t error_t;
@@ -32,6 +36,14 @@ typedef struct {
   // Smoothed state of analog reads.
   int16_t wa[4];
 } ads1115_state;
+
+typedef struct {
+  uint8_t rpins[MAT_W], wpins[MAT_H];
+  uint8_t codes[MAT_H][MAT_W];
+} matrix_pins_t;
+typedef struct {
+  uint8_t s[MAT_H * MAT_W];
+} matrix_state_t;
 
 void dprintf(const char *format, ...);
 
@@ -49,6 +61,12 @@ error_t updateWindows(const ads1115_state *adc, int16_t *wa);
 error_t initJoystick();
 
 Joystick_ joystick(JOYSTICK_DEFAULT_REPORT_ID, JOYSTICK_TYPE_JOYSTICK, 0, 0, true, true, true, true, false, false, false, false, false, false, false);
+
+
+
+error_t prepMatrix(const matrix_pins_t * pins, matrix_state_t * state);
+error_t scanMatrix(const matrix_pins_t * pins, matrix_state_t * state, void (*cb)(uint8_t code, uint8_t change));
+void buttonChange(uint8_t code, uint8_t change);
 
 
 // Begin Definitions.
@@ -395,7 +413,6 @@ void updateWindows(ads1115_state * adc) {
   }
 #endif
   for (uint8_t i = 0; i < 4; ++i) {
-
     r = adc->a[i];
     o = adc->wa[i];
 #if DEBUG_WINDOWS
@@ -437,6 +454,66 @@ void joystickInit() {
 // Button Matrix
 
 
+// Matrix code
+
+matrix_pins_t pins = {
+  .rpins = {7, 8, 9},
+  .wpins = {4, 5, 6},
+
+  .codes = {
+    {0, 1, 2},
+    {3, 4, 5},
+    {6, 7, 8},
+  },
+};
+matrix_state_t matrix_state;
+
+error_t prepMatrix(const matrix_pins_t * pins, matrix_state_t * state) {
+  if (pins == NULL) {
+    dprintf("prepMatrix(): Null pointer.");
+    return 1;
+  }
+  for (uint8_t i = 0; i < sizeof(pins->wpins); ++i) {
+    pinMode(pins->wpins[i], OUTPUT);
+  }
+  for (uint8_t j = 0; j < sizeof(pins->rpins); ++j) {
+    pinMode(pins->rpins[j], INPUT_PULLUP);
+  }
+  for (uint8_t k = 0; k < sizeof(state->s); ++k) {
+    state->s[k] = HIGH;
+  }
+  dprintf("matrix ready");
+  return 0;
+}
+
+uint8_t scan_count = 0;
+
+error_t scanMatrix(const matrix_pins_t * pins, matrix_state_t * state, void (*cb)(uint8_t code, uint8_t change)) {
+  uint8_t code, value;
+  if (pins == NULL) {
+    dprintf("prepMatrix(): Null pointer.");
+    return 1;
+  }
+  
+  for (uint8_t i = 0; i < sizeof(pins->wpins); ++i) {
+    digitalWrite(pins->wpins[i], LOW);
+    for (uint8_t j = 0; j < sizeof(pins->rpins); ++j) {
+      value = digitalRead(pins->rpins[j]);
+      code = pins->codes[i][j];
+      if ( value != state->s[code]) {
+        (*cb)(code, value);
+        state->s[code] = (uint8_t)value;
+      }
+    }
+    digitalWrite(pins->wpins[i], HIGH);
+  }
+}
+
+
+void buttonChange(uint8_t code, uint8_t change) {
+  dprintf("Button %d set to %s.", code, change == LOW ? "LOW" : "HIGH");
+}
+
 // Global state.
 ads1115_state adc {.addr = ADDR, .mask = 0b1111};
 
@@ -458,9 +535,14 @@ void setup() {
   dprintf(humanConfigz(adc.config));
 
   joystickInit();
+  
+  prepMatrix(&pins, &matrix_state);
 
   dprintf("done");
 }
+
+
+uint8_t err_counter;
 
 void loop() {
   uint8_t err;
@@ -477,7 +559,7 @@ void loop() {
     dprintf(bitConfigz(adc.config));
     dprintf(humanConfigz(adc.config));
   }
-
+  
   for (uint8_t i = 0; i < 4; ++i) {
 #if DEBUG
     if (adc.wa[i] != last[i]) {
@@ -503,5 +585,15 @@ void loop() {
     }
 #endif
   }
+  
+  err = scanMatrix(&pins, &matrix_state, &buttonChange);
+  if (err != 0){
+   --err_counter; 
+  if (err_counter = 0) {
+    dprintf("scanMatrix(): error: %d", err);
+    err_counter = 100;
+  }
+  }
+  
   joystick.sendState();
 }
