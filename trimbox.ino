@@ -8,6 +8,7 @@
 
 // If >0, output debug info to Serial, and do not act as a joystick.
 #define DEBUG 1
+#define DEBUG_WINDOWS (DEBUG & 0x2)
 
 // ADS1115 specific codes.
 // Assuming ADDR wired to GND... adjust as needed.
@@ -15,7 +16,10 @@
 #define REG_CONV 0b00
 #define REG_CONFIG 0b01
 
-#define WINDOW_SIZE 2
+// This determines how many bits to discard from analog axes. This should be at least 1 
+// (ADS1115 supports only 15 bits), but in practice, I find throwing 3 bits out (13 bit resolution) 
+// is necessary to de-noise the axes. 
+#define WINDOW_SIZE 3
 #define WINDOW_H (WINDOW_SIZE ? (0b1 << (WINDOW_SIZE - 1)) : 0)
 #define WINDOW_L (WINDOW_SIZE ? (-WINDOW_H + 1) : 0)
 
@@ -326,8 +330,8 @@ error_t readAdc(ads1115_state *adc, uint8_t idx) {
   config |= (0b1 << 14);
   config |= (idx << 12);
   // Request conversion
-  config |= (0b1 << 15)
-            err = writeConfig(adc, config);
+  config |= (0b1 << 15);
+  err = writeConfig(adc, config);
   if (err != 0) {
     return err;
   }
@@ -373,18 +377,42 @@ error_t readAll(ads1115_state *adc) {
   return 0;
 }
 
+// Update the values of the analog axes, as filtered by a moving window. 
+// The algorithm used here is designed to produce output that is a little "sticky", that is, it doesn't move 
+// on its own once the axis is parked. This is a good fit for set-and-forget inputs like trim wheels, as 
+// it helps avoid ghostly inputs. It's not appropriate for hands-on inputs like a joystick; a moving average 
+// would be more appropriate there. 
 void updateWindows(ads1115_state * adc) {
   uint16_t r, o;
+
+#if DEBUG_WINDOWS
+  static uint8_t ranFlag;
+  if (ranFlag == 0) {
+    ranFlag = 1;
+    dprintf("WINDOW_SIZE: %d, WINDOW_L: %d, WINDOW_H %d", WINDOW_SIZE, WINDOW_L, WINDOW_H);
+  }
+#endif
   for (uint8_t i = 0; i < 4; ++i) {
+
     r = adc->a[i];
     o = adc->wa[i];
+#if DEBUG_WINDOWS
+    dprintf("Read i=%d: r=%d, o=%d", i, r, o);
+#endif
 
-    // if this would overflow/underflow, then no need to move window in respective direction. 
-    if ((INT16_MIN - WINDOW_L > o) && (r < (o + WINDOW_L))) {
-      wa[i] = r - WINDOW_L;
+    // if this would overflow/underflow, then no need to move window in respective direction.
+    // UINT16_MIN
+    if ((0 - WINDOW_L < o) && (r < (o + WINDOW_L))) {
+      adc->wa[i] = r - WINDOW_L;
+#if DEBUG_WINDOWS
+      dprintf("Lower to %d", adc->wa[i]);
+#endif
     }
-    else if ((INT16_MAX - WINDOW_H < o) && (r > (o + WINDOW_H))) {
-      wa[i] = r - WINDOW_H;
+    else if ((UINT16_MAX - WINDOW_H > o) && (r > (o + WINDOW_H))) {
+      adc->wa[i] = r - WINDOW_H;
+#if DEBUG_WINDOWS
+      dprintf("Raise to %d", adc->wa[i]);
+#endif
     }
   }
 }
@@ -396,13 +424,15 @@ void joystickInit() {
 #else
   Joystick.begin();
 }
+#endif
+}
 
 // Encoders
 // Button Matrix
 
 
 // Global state.
-ads1115_state adc {.addr = ADDR, .mask = 0b0011};
+ads1115_state adc {.addr = ADDR, .mask = 0b1111};
 Joystick_ joystick;
 
 // Entrypoints.
@@ -422,6 +452,20 @@ void setup() {
   dprintf(bitConfigz(adc.config));
   dprintf(humanConfigz(adc.config));
 
+
+  dprintf(bitConfigz(adc.config));
+  dprintf(humanConfigz(adc.config));
+
+  joystickInit();
+
+  dprintf("done");
+}
+
+void loop() {
+  uint8_t err;
+  static uint16_t last[4];
+
+  delay(50);
   err = readAll(&adc);
   if (err != 0) {
     err = readConfig(&adc);
@@ -432,15 +476,9 @@ void setup() {
   }
 
   for (uint8_t i = 0; i < 4; ++i) {
-    dprintf("A%d:%d", i, adc.a[i]);
+    if (adc.wa[i] != last[i]) {
+      dprintf("A%d:%d", i, adc.wa[i]);
+      last[i] = adc.wa[i];
+    }
   }
-
-  dprintf(bitConfigz(adc.config));
-  dprintf(humanConfigz(adc.config));
-
-  joystickInit();
-
-  dprintf("done");
 }
-
-void loop() {}
