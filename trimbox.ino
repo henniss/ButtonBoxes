@@ -1,13 +1,11 @@
 #include <stdint.h>
 #include <stdarg.h>
 
-#include <Key.h>
-#include <Keypad.h>
 #include <Joystick.h>
 #include <Wire.h>
 
 // If >0, output debug info to Serial, and do not act as a joystick.
-#define DEBUG 1
+#define DEBUG 0
 #define DEBUG_WINDOWS (DEBUG & 0x2)
 
 // ADS1115 specific codes.
@@ -16,9 +14,9 @@
 #define REG_CONV 0b00
 #define REG_CONFIG 0b01
 
-// This determines how many bits to discard from analog axes. This should be at least 1 
-// (ADS1115 supports only 15 bits), but in practice, I find throwing 3 bits out (13 bit resolution) 
-// is necessary to de-noise the axes. 
+// This determines how many bits to discard from analog axes. This should be at least 1
+// (ADS1115 supports only 15 bits), but in practice, I find throwing 3 bits out (13 bit resolution)
+// is necessary to de-noise the axes.
 #define WINDOW_SIZE 3
 #define WINDOW_H (WINDOW_SIZE ? (0b1 << (WINDOW_SIZE - 1)) : 0)
 #define WINDOW_L (WINDOW_SIZE ? (-WINDOW_H + 1) : 0)
@@ -48,6 +46,10 @@ const char* humanConfigz(const ads1115_state *adc);
 error_t readAdc(ads1115_state *adc, uint8_t idx);
 error_t readAll(ads1115_state *adc);
 error_t updateWindows(const ads1115_state *adc, int16_t *wa);
+error_t initJoystick();
+
+Joystick_ joystick(JOYSTICK_DEFAULT_REPORT_ID, JOYSTICK_TYPE_JOYSTICK, 0, 0, true, true, true, true, false, false, false, false, false, false, false);
+
 
 // Begin Definitions.
 
@@ -337,7 +339,7 @@ error_t readAdc(ads1115_state *adc, uint8_t idx) {
   }
 
   // Todo(tune this)
-  delay(70);
+  delay(10);
 
   Wire.beginTransmission(adc->addr);
   Wire.write(REG_CONV);
@@ -377,11 +379,11 @@ error_t readAll(ads1115_state *adc) {
   return 0;
 }
 
-// Update the values of the analog axes, as filtered by a moving window. 
-// The algorithm used here is designed to produce output that is a little "sticky", that is, it doesn't move 
-// on its own once the axis is parked. This is a good fit for set-and-forget inputs like trim wheels, as 
-// it helps avoid ghostly inputs. It's not appropriate for hands-on inputs like a joystick; a moving average 
-// would be more appropriate there. 
+// Update the values of the analog axes, as filtered by a moving window.
+// The algorithm used here is designed to produce output that is a little "sticky", that is, it doesn't move
+// on its own once the axis is parked. This is a good fit for set-and-forget inputs like trim wheels, as
+// it helps avoid ghostly inputs. It's not appropriate for hands-on inputs like a joystick; a moving average
+// would be more appropriate there.
 void updateWindows(ads1115_state * adc) {
   uint16_t r, o;
 
@@ -422,8 +424,12 @@ void updateWindows(ads1115_state * adc) {
 void joystickInit() {
 #if DEBUG
 #else
-  Joystick.begin();
-}
+  //             autoSendState
+  joystick.begin(true);
+  joystick.setXAxisRange(INT16_MIN, INT16_MAX);
+  joystick.setYAxisRange(INT16_MIN, INT16_MAX);
+  joystick.setZAxisRange(INT16_MIN, INT16_MAX);
+  joystick.setRxAxisRange(INT16_MIN, INT16_MAX);
 #endif
 }
 
@@ -433,7 +439,6 @@ void joystickInit() {
 
 // Global state.
 ads1115_state adc {.addr = ADDR, .mask = 0b1111};
-Joystick_ joystick;
 
 // Entrypoints.
 
@@ -452,10 +457,6 @@ void setup() {
   dprintf(bitConfigz(adc.config));
   dprintf(humanConfigz(adc.config));
 
-
-  dprintf(bitConfigz(adc.config));
-  dprintf(humanConfigz(adc.config));
-
   joystickInit();
 
   dprintf("done");
@@ -465,7 +466,7 @@ void loop() {
   uint8_t err;
   static uint16_t last[4];
 
-  delay(50);
+  delay(20);
   err = readAll(&adc);
   if (err != 0) {
     err = readConfig(&adc);
@@ -473,12 +474,34 @@ void loop() {
       return;
     }
     // We'd like to see what config is set to, in this case...
+    dprintf(bitConfigz(adc.config));
+    dprintf(humanConfigz(adc.config));
   }
 
   for (uint8_t i = 0; i < 4; ++i) {
+#if DEBUG
     if (adc.wa[i] != last[i]) {
       dprintf("A%d:%d", i, adc.wa[i]);
       last[i] = adc.wa[i];
     }
+#else
+    switch (i) {
+      case 0:
+        joystick.setXAxis((int32_t)adc.wa[i]);
+        break;
+      case 1:
+        joystick.setYAxis((int32_t)adc.wa[i]);
+        break;
+      case 2:
+        joystick.setZAxis((int32_t)adc.wa[i]);
+        break;
+      case 3:
+        joystick.setRxAxis((int32_t)adc.wa[i]);
+        break;
+      default:
+        dprintf("Impossible joystick index %d.", i);
+    }
+#endif
   }
+  joystick.sendState();
 }
