@@ -4,7 +4,8 @@
 #include <Joystick.h>
 #include <Wire.h>
 
-// If >0, output debug info to Serial, and do not act as a joystick.
+// If >0, output debug info to Serial, and do not act as a joystick (trying to do so seems to interfere
+// with the serial monitor)
 #define DEBUG 0
 #define DEBUG_WINDOWS (DEBUG & 0x2)
 #define DEBUG_MATRIX (DEBUG & 0x4)
@@ -17,7 +18,7 @@
 
 // This determines how many bits to discard from analog axes. This should be at least 1
 // (ADS1115 supports only 15 bits), but in practice, I find throwing 3 bits out (13 bit resolution)
-// is necessary to de-noise the axes.
+// is necessary to de-noise the axes on my device.
 #define WINDOW_SIZE 3
 #define WINDOW_H (WINDOW_SIZE ? (0b1 << (WINDOW_SIZE - 1)) : 0)
 #define WINDOW_L (WINDOW_SIZE ? (-WINDOW_H + 1) : 0)
@@ -28,8 +29,8 @@
 
 // Forward Declarations.
 // Wouldn't normally be necessary, but arduino's IDE seems to sometimes insert these in the wrong place.
-typedef uint8_t error_t;
 typedef struct {
+  // the 4 lowest bits of mask determine which axes should be read. 
   uint8_t addr, mask;
   uint16_t config;
   // Raw state of analog reads.
@@ -48,41 +49,47 @@ typedef struct {
 
 void dprintf(const char *format, ...);
 
-
-error_t prepareAdc(ads1115_state *adc);
-error_t readConfig(ads1115_state *adc);
-error_t writeConfig(ads1115_state *adc, uint16_t config);
+uint8_t prepareAdc(ads1115_state *adc);
+uint8_t readConfig(ads1115_state *adc);
+uint8_t writeConfig(ads1115_state *adc, uint16_t config);
 // Split the config word on sections into a null-terminated string.
 const char* bitConfigz(const ads1115_state *adc);
 // Parse the config word into a null-terminated string.
 const char* humanConfigz(const ads1115_state *adc);
-error_t readAdc(ads1115_state *adc, uint8_t idx);
-error_t readAll(ads1115_state *adc);
-error_t updateWindows(const ads1115_state *adc, int16_t *wa);
-error_t initJoystick();
+uint8_t readAdc(ads1115_state *adc, uint8_t idx);
+uint8_t readAll(ads1115_state *adc);
+// Needs a better name.
+// Check the latest raw values, and update the "window"/smoothed values of the adc1115_state struct. 
+uint8_t updateWindows(const ads1115_state *adc, int16_t *wa);
+uint8_t initJoystick();
 
-error_t prepMatrix(const matrix_pins_t * pins, matrix_state_t * state);
-error_t scanMatrix(const matrix_pins_t * pins, matrix_state_t * state, void (*cb)(uint8_t code, uint8_t change));
+uint8_t initMatrix(const matrix_pins_t * pins, matrix_state_t * state);
+uint8_t scanMatrix(const matrix_pins_t * pins, matrix_state_t * state, void (*cb)(uint8_t code, uint8_t change));
 void buttonChange(uint8_t code, uint8_t change);
 
 Joystick_ joystick(JOYSTICK_DEFAULT_REPORT_ID, JOYSTICK_TYPE_JOYSTICK, 9, 0, true, true, true, true, false, false, false, false, false, false, false);
 
 matrix_pins_t pins = {
+  // We'll write LOW to wpins. Fill these such that current can flow from rpins to wpins. 
   .rpins = {7, 8, 9},
   .wpins = {4, 5, 6},
 
-// What order do we use here? 
-// If we populate .codes in the obvious incremental order, we 
-// then the reported codes (down the line) will be 581076432. 
-//                                      (Indices): 012345678
-// IOW, we need to start with:
+// If we fill .codes in the naive way:
 //  .codes = {
 //    {0, 1, 2},
 //    {3, 4, 5},
 //    {6, 7, 8},
 //  },
-// and apply the inverse permutation (0 5 6 4 7 3)(1 8 2)
-// to get a list of codes that will map back to 0-8.
+// we wind up with a confusing mapping of physical buttons to codes. 
+// To make sure they're in a sensible order, start with .codes as defined above. 
+// Flip through your buttons in an order that makes sense (e.g., top to bottom)
+// and fill the p(x) line of the following table, in order:
+// id(x): 012345678
+// p(x):  581076432
+// Write down the permutation p this defines:
+// (0 5 6 4 7 3)(1 8 2)
+// and apply the inverse of this permutation to the values in .codes
+// to get a button code order that will be sequential on your hardware.
   .codes = {
     {3, 2, 8},
     {7, 6, 0},
@@ -114,8 +121,8 @@ void dprintf(const char * format, ...) {
   ( n & 0b100 ? (n & 0b010 ? (n & 0b001 ? '7' : '6') : (n & 0b001 ? '5' : '4') ) : (n & 0b010 ? (n & 0b001 ? '3' : '2') : (n & 0b001 ? '1' : '0') ))
 
 // Loads the configuration presently on the device, setting adc->config
-error_t readConfig(ads1115_state *adc) {
-  error_t err;
+uint8_t readConfig(ads1115_state *adc) {
+  uint8_t err;
   if (adc == NULL) {
     dprintf("readConfig(): NULL pointer");
     return 1;
@@ -143,8 +150,8 @@ error_t readConfig(ads1115_state *adc) {
   return 0;
 }
 
-error_t writeConfig(ads1115_state *adc, uint16_t config) {
-  error_t err;
+uint8_t writeConfig(ads1115_state *adc, uint16_t config) {
+  uint8_t err;
   if (adc == NULL) {
     dprintf("readConfig(): NULL pointer");
     return 1;
@@ -335,9 +342,9 @@ ret:
 #endif
 }
 
-error_t prepareAdc(ads1115_state *adc) {
+uint8_t prepareAdc(ads1115_state *adc) {
   uint16_t config;
-  error_t err;
+  uint8_t err;
   if (adc == NULL) {
     dprintf("prepareAdc(): NULL pointer");
     return 1;
@@ -349,9 +356,9 @@ error_t prepareAdc(ads1115_state *adc) {
 }
 
 
-error_t readAdc(ads1115_state *adc, uint8_t idx) {
+uint8_t readAdc(ads1115_state *adc, uint8_t idx) {
   uint16_t config;
-  error_t err;
+  uint8_t err;
   if (adc == NULL) {
     dprintf("readAdc(): NULL pointer");
     return 1;
@@ -378,6 +385,11 @@ error_t readAdc(ads1115_state *adc, uint8_t idx) {
   }
 
   // Todo(tune this)
+  // I'm using this for trim and mixture, which aren't very latency sensitive. If 
+  // you're planning to use this for primary flight controls, I suggest reading 
+  // the data-sheet and enabling high-speed mode (at the cost of some resolution)
+  // and probably continous read mode. I haven't made any attempt to optimize speed, 
+  // since it's just not an issue for my use case. 
   delay(10);
 
   Wire.beginTransmission(adc->addr);
@@ -401,8 +413,8 @@ error_t readAdc(ads1115_state *adc, uint8_t idx) {
   return 0;
 }
 
-error_t readAll(ads1115_state *adc) {
-  error_t err;
+uint8_t readAll(ads1115_state *adc) {
+  uint8_t err;
   if (adc == NULL) {
     dprintf("readAll(): NULL pointer");
     return 1;
@@ -472,13 +484,16 @@ void joystickInit() {
 }
 
 // Encoders
+
+// TODO
+
 // Button Matrix
 
 matrix_state_t matrix_state;
 
-error_t prepMatrix(const matrix_pins_t * pins, matrix_state_t * state) {
+uint8_t initMatrix(const matrix_pins_t * pins, matrix_state_t * state) {
   if (pins == NULL) {
-    dprintf("prepMatrix(): Null pointer.");
+    dprintf("initMatrix(): Null pointer.");
     return 1;
   }
   for (uint8_t i = 0; i < sizeof(pins->wpins); ++i) {
@@ -494,12 +509,10 @@ error_t prepMatrix(const matrix_pins_t * pins, matrix_state_t * state) {
   return 0;
 }
 
-uint8_t scan_count = 0;
-
-error_t scanMatrix(const matrix_pins_t * pins, matrix_state_t * state, void (*cb)(uint8_t code, uint8_t change)) {
+uint8_t scanMatrix(const matrix_pins_t * pins, matrix_state_t * state, void (*cb)(uint8_t code, uint8_t change)) {
   uint8_t code, value;
   if (pins == NULL) {
-    dprintf("prepMatrix(): Null pointer.");
+    dprintf("initMatrix(): Null pointer.");
     return 1;
   }
 
@@ -551,7 +564,7 @@ void setup() {
 
   joystickInit();
 
-  prepMatrix(&pins, &matrix_state);
+  initMatrix(&pins, &matrix_state);
 
   dprintf("done");
 }
