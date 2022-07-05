@@ -7,6 +7,7 @@
 // If >0, output debug info to Serial, and do not act as a joystick.
 #define DEBUG 0
 #define DEBUG_WINDOWS (DEBUG & 0x2)
+#define DEBUG_MATRIX (DEBUG & 0x4)
 
 // ADS1115 specific codes.
 // Assuming ADDR wired to GND... adjust as needed.
@@ -60,14 +61,34 @@ error_t readAll(ads1115_state *adc);
 error_t updateWindows(const ads1115_state *adc, int16_t *wa);
 error_t initJoystick();
 
-Joystick_ joystick(JOYSTICK_DEFAULT_REPORT_ID, JOYSTICK_TYPE_JOYSTICK, 0, 0, true, true, true, true, false, false, false, false, false, false, false);
-
-
-
 error_t prepMatrix(const matrix_pins_t * pins, matrix_state_t * state);
 error_t scanMatrix(const matrix_pins_t * pins, matrix_state_t * state, void (*cb)(uint8_t code, uint8_t change));
 void buttonChange(uint8_t code, uint8_t change);
 
+Joystick_ joystick(JOYSTICK_DEFAULT_REPORT_ID, JOYSTICK_TYPE_JOYSTICK, 9, 0, true, true, true, true, false, false, false, false, false, false, false);
+
+matrix_pins_t pins = {
+  .rpins = {7, 8, 9},
+  .wpins = {4, 5, 6},
+
+// What order do we use here? 
+// If we populate .codes in the obvious incremental order, we 
+// then the reported codes (down the line) will be 581076432. 
+//                                      (Indices): 012345678
+// IOW, we need to start with:
+//  .codes = {
+//    {0, 1, 2},
+//    {3, 4, 5},
+//    {6, 7, 8},
+//  },
+// and apply the inverse permutation (0 5 6 4 7 3)(1 8 2)
+// to get a list of codes that will map back to 0-8.
+  .codes = {
+    {3, 2, 8},
+    {7, 6, 0},
+    {5, 4, 1},
+  },
+};
 
 // Begin Definitions.
 
@@ -453,19 +474,6 @@ void joystickInit() {
 // Encoders
 // Button Matrix
 
-
-// Matrix code
-
-matrix_pins_t pins = {
-  .rpins = {7, 8, 9},
-  .wpins = {4, 5, 6},
-
-  .codes = {
-    {0, 1, 2},
-    {3, 4, 5},
-    {6, 7, 8},
-  },
-};
 matrix_state_t matrix_state;
 
 error_t prepMatrix(const matrix_pins_t * pins, matrix_state_t * state) {
@@ -494,12 +502,17 @@ error_t scanMatrix(const matrix_pins_t * pins, matrix_state_t * state, void (*cb
     dprintf("prepMatrix(): Null pointer.");
     return 1;
   }
-  
+
   for (uint8_t i = 0; i < sizeof(pins->wpins); ++i) {
     digitalWrite(pins->wpins[i], LOW);
     for (uint8_t j = 0; j < sizeof(pins->rpins); ++j) {
       value = digitalRead(pins->rpins[j]);
       code = pins->codes[i][j];
+#if DEBUG_MATRIX
+      if (value == LOW) {
+        dprintf("%d -> %d LOW (button %d)", pins->wpins[i], pins->rpins[j], code);
+      }
+#endif
       if ( value != state->s[code]) {
         (*cb)(code, value);
         state->s[code] = (uint8_t)value;
@@ -509,9 +522,11 @@ error_t scanMatrix(const matrix_pins_t * pins, matrix_state_t * state, void (*cb
   }
 }
 
-
 void buttonChange(uint8_t code, uint8_t change) {
   dprintf("Button %d set to %s.", code, change == LOW ? "LOW" : "HIGH");
+#if !DEBUG
+  joystick.setButton(code, change == LOW ? 1 : 0);
+#endif
 }
 
 // Global state.
@@ -535,14 +550,13 @@ void setup() {
   dprintf(humanConfigz(adc.config));
 
   joystickInit();
-  
+
   prepMatrix(&pins, &matrix_state);
 
   dprintf("done");
 }
 
 
-uint8_t err_counter;
 
 void loop() {
   uint8_t err;
@@ -559,7 +573,7 @@ void loop() {
     dprintf(bitConfigz(adc.config));
     dprintf(humanConfigz(adc.config));
   }
-  
+
   for (uint8_t i = 0; i < 4; ++i) {
 #if DEBUG
     if (adc.wa[i] != last[i]) {
@@ -585,15 +599,13 @@ void loop() {
     }
 #endif
   }
-  
+
   err = scanMatrix(&pins, &matrix_state, &buttonChange);
-  if (err != 0){
-   --err_counter; 
-  if (err_counter = 0) {
+  if (err != 0) {
+#if DEBUG_MATRIX
     dprintf("scanMatrix(): error: %d", err);
-    err_counter = 100;
+#endif
   }
-  }
-  
+
   joystick.sendState();
 }
