@@ -524,7 +524,7 @@ void initJoystick() {
 #if DEBUG
 #else
   //             autoSendState
-  joystick.begin(true);
+  joystick.begin(false);
   joystick.setXAxisRange(INT16_MIN, INT16_MAX);
   joystick.setYAxisRange(INT16_MIN, INT16_MAX);
   joystick.setZAxisRange(INT16_MIN, INT16_MAX);
