@@ -87,15 +87,15 @@ matrix_pins_t pins = {
   // Flip through your buttons in an order that makes sense (e.g., top to bottom)
   // and fill the p(x) line of the following table, in order:
   // id(x): 012345678
-  // p(x):  581076432
+  // p(x):  581067432
   // Write down the permutation p this defines:
-  // (0 5 6 4 7 3)(1 8 2)
+  // (0 5 7 4 6 3)(1 8 2)
   // and apply the inverse of this permutation to the values in .codes
   // to get a button code order that will be sequential on your hardware.
   .codes = {
     {3, 2, 8},
-    {7, 6, 0},
-    {5, 4, 1},
+    {6, 7, 0},
+    {4, 5, 1},
   },
 };
 
