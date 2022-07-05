@@ -9,6 +9,7 @@
 #define DEBUG 0
 #define DEBUG_WINDOWS (DEBUG & 0x2)
 #define DEBUG_MATRIX (DEBUG & 0x4)
+#define DEBUG_TIMING (DEBUG & 0x8)
 
 // ADS1115 specific codes.
 // Assuming ADDR wired to GND... adjust as needed.
@@ -17,8 +18,8 @@
 #define REG_CONFIG 0b01
 
 // This determines how many bits to discard from analog axes. This should be at least 1
-// (ADS1115 supports only 15 bits), but in practice, I find throwing 3 bits out (13 bit resolution)
-// is necessary to de-noise the axes on my device.
+// (ADS1115 supports only 15 bits in absolute mode), but in practice, I find throwing
+// 3 bits out (13 bit resolution) is necessary to de-noise the axes on my device.
 #define WINDOW_SIZE 3
 #define WINDOW_H (WINDOW_SIZE ? (0b1 << (WINDOW_SIZE - 1)) : 0)
 #define WINDOW_L (WINDOW_SIZE ? (-WINDOW_H + 1) : 0)
@@ -30,13 +31,14 @@
 // Forward Declarations.
 // Wouldn't normally be necessary, but arduino's IDE seems to sometimes insert these in the wrong place.
 typedef struct {
-  // the 4 lowest bits of mask determine which axes should be read. 
+  // addr: 7 bit i2c address
+  // mask: 4 bit mask determining which axes (A0-A3) should be read.
   uint8_t addr, mask;
   uint16_t config;
   // Raw state of analog reads.
-  int16_t a[4];
+  int16_t raw[4];
   // Smoothed state of analog reads.
-  int16_t wa[4];
+  int16_t cur[4];
 } ads1115_state;
 
 typedef struct {
@@ -49,47 +51,47 @@ typedef struct {
 
 void dprintf(const char *format, ...);
 
-uint8_t prepareAdc(ads1115_state *adc);
+uint8_t initAdc(ads1115_state *adc);
 uint8_t readConfig(ads1115_state *adc);
 uint8_t writeConfig(ads1115_state *adc, uint16_t config);
 // Split the config word on sections into a null-terminated string.
 const char* bitConfigz(const ads1115_state *adc);
 // Parse the config word into a null-terminated string.
 const char* humanConfigz(const ads1115_state *adc);
-uint8_t readAdc(ads1115_state *adc, uint8_t idx);
-uint8_t readAll(ads1115_state *adc);
-// Needs a better name.
-// Check the latest raw values, and update the "window"/smoothed values of the adc1115_state struct. 
-uint8_t updateWindows(const ads1115_state *adc, int16_t *wa);
-uint8_t initJoystick();
+uint8_t checkConversionReady(ads1115_state *adc);
+uint8_t readAdcI(ads1115_state *adc, uint8_t idx);
+uint8_t readAdc(ads1115_state *adc);
+// Compute the new axis value from the previous value, and the raw read.
+uint16_t moveWindow(uint16_t prev, uint16_t next);
 
 uint8_t initMatrix(const matrix_pins_t * pins, matrix_state_t * state);
 uint8_t scanMatrix(const matrix_pins_t * pins, matrix_state_t * state, void (*cb)(uint8_t code, uint8_t change));
 void buttonChange(uint8_t code, uint8_t change);
 
+void initJoystick();
 Joystick_ joystick(JOYSTICK_DEFAULT_REPORT_ID, JOYSTICK_TYPE_JOYSTICK, 9, 0, true, true, true, true, false, false, false, false, false, false, false);
 
 matrix_pins_t pins = {
-  // We'll write LOW to wpins. Fill these such that current can flow from rpins to wpins. 
+  // We'll write LOW to wpins. Fill these such that current can flow from rpins to wpins.
   .rpins = {7, 8, 9},
   .wpins = {4, 5, 6},
 
-// If we fill .codes in the naive way:
-//  .codes = {
-//    {0, 1, 2},
-//    {3, 4, 5},
-//    {6, 7, 8},
-//  },
-// we wind up with a confusing mapping of physical buttons to codes. 
-// To make sure they're in a sensible order, start with .codes as defined above. 
-// Flip through your buttons in an order that makes sense (e.g., top to bottom)
-// and fill the p(x) line of the following table, in order:
-// id(x): 012345678
-// p(x):  581076432
-// Write down the permutation p this defines:
-// (0 5 6 4 7 3)(1 8 2)
-// and apply the inverse of this permutation to the values in .codes
-// to get a button code order that will be sequential on your hardware.
+  // If we fill .codes in the naive way:
+  //  .codes = {
+  //    {0, 1, 2},
+  //    {3, 4, 5},
+  //    {6, 7, 8},
+  //  },
+  // we wind up with a confusing mapping of physical buttons to codes.
+  // To make sure they're in a sensible order, start with .codes as defined above.
+  // Flip through your buttons in an order that makes sense (e.g., top to bottom)
+  // and fill the p(x) line of the following table, in order:
+  // id(x): 012345678
+  // p(x):  581076432
+  // Write down the permutation p this defines:
+  // (0 5 6 4 7 3)(1 8 2)
+  // and apply the inverse of this permutation to the values in .codes
+  // to get a button code order that will be sequential on your hardware.
   .codes = {
     {3, 2, 8},
     {7, 6, 0},
@@ -342,25 +344,41 @@ ret:
 #endif
 }
 
-uint8_t prepareAdc(ads1115_state *adc) {
+uint8_t initAdc(ads1115_state *adc) {
   uint16_t config;
   uint8_t err;
   if (adc == NULL) {
-    dprintf("prepareAdc(): NULL pointer");
+    dprintf("initAdc(): NULL pointer");
     return 1;
   }
   // Don't bother configuring input mutex: that's set per-read.
-  //         4V gain      single-shot      128SPS     disable comparator
-  config = ((0b001 << 9) | (0b1 << 8) | (0b100 << 5) |  (0b11 << 0));
+  //         4V gain       single-shot      475SPS     disable comparator
+  config = ((0b001 << 9) | (0b1 << 8) | (0b110 << 5) |  (0b11 << 0));
   writeConfig(adc, config);
 }
 
+uint8_t checkConversionReady(ads1115_state *adc, uint8_t *ready) {
+  uint8_t err;
+  err = readConfig(adc);
+  if (err != 0) {
+    return err;
+  }
+  // Necessary to shift this right so it fits in uint8_t
+  *ready = (adc->config >> 15) & 0b1;
+  return 0;
+}
 
-uint8_t readAdc(ads1115_state *adc, uint8_t idx) {
+
+uint8_t readAdcI(ads1115_state *adc, uint8_t idx) {
   uint16_t config;
   uint8_t err;
+#if DEBUG_TIMING
+  static uint8_t sample;
+  uint32_t start, end;
+  ++sample;
+#endif
   if (adc == NULL) {
-    dprintf("readAdc(): NULL pointer");
+    dprintf("readAdcI(): NULL pointer");
     return 1;
   }
   // Clamp to 0-3
@@ -383,14 +401,40 @@ uint8_t readAdc(ads1115_state *adc, uint8_t idx) {
   if (err != 0) {
     return err;
   }
+#if DEBUG_TIMING
+  if (sample % 200 == 1) {
+    start = millis();
+    dprintf("Started conversion");
+  }
+#endif
 
-  // Todo(tune this)
-  // I'm using this for trim and mixture, which aren't very latency sensitive. If 
-  // you're planning to use this for primary flight controls, I suggest reading 
-  // the data-sheet and enabling high-speed mode (at the cost of some resolution)
-  // and probably continous read mode. I haven't made any attempt to optimize speed, 
-  // since it's just not an issue for my use case. 
-  delay(10);
+  uint8_t ready;
+  for (uint16_t i = 0;; ++i) {
+    // I'm not sure if this is actually a good approach...
+    // It's simpler and marginally slower to just use a fixed delay (e.g. 5ms)
+    // although this does at least have the virtue of getting us timing data 
+    // to use to tune that delay. Consider ripping this out in the future. 
+    err = checkConversionReady(adc, &ready);
+    if (err != 0) {
+      return err;
+    }
+    if (ready) {
+#if DEBUG_TIMING
+      if (sample % 200 == 1) {
+        end = millis();
+        dprintf("Conversion ready after %d millis.", end - start);
+      }
+#endif
+      break;
+    }
+#if DEBUG_TIMING
+    if ((sample % 200 == 1) &&  (i % 4 == 2)) {
+      end = millis();
+      dprintf("Conversion not ready after %d millis.", end - start);
+    }
+#endif
+    delay(1);
+  }
 
   Wire.beginTransmission(adc->addr);
   Wire.write(REG_CONV);
@@ -401,43 +445,45 @@ uint8_t readAdc(ads1115_state *adc, uint8_t idx) {
   }
   Wire.requestFrom(adc->addr, byte(2));
   if (2 <= Wire.available()) {
-    adc->a[idx] = Wire.read();
-    adc->a[idx] <<= 8;
-    adc->a[idx] |= Wire.read();
+    adc->raw[idx] = Wire.read();
+    adc->raw[idx] <<= 8;
+    adc->raw[idx] |= Wire.read();
   }
   else {
-    dprintf("readAdc(): wire not available.");
+    dprintf("readAdcI(): wire not available.");
     return 2;
   }
 
   return 0;
 }
 
-uint8_t readAll(ads1115_state *adc) {
+uint8_t readAdc(ads1115_state *adc) {
   uint8_t err;
   if (adc == NULL) {
-    dprintf("readAll(): NULL pointer");
+    dprintf("readAdc(): NULL pointer");
     return 1;
   }
 
-  for (uint8_t idx = 0; idx < 4; ++idx) {
-    err = readAdc(adc, idx);
+  for (uint8_t i = 0; i < 4; ++i) {
+    err = readAdcI(adc, i);
     if (err != 0) {
       return err;
     }
+    adc->cur[i] = moveWindow(adc->cur[i], adc->raw[i]);
   }
-  updateWindows(adc);
   return 0;
 }
 
-// Update the values of the analog axes, as filtered by a moving window.
 // The algorithm used here is designed to produce output that is a little "sticky", that is, it doesn't move
 // on its own once the axis is parked. This is a good fit for set-and-forget inputs like trim wheels, as
 // it helps avoid ghostly inputs. It's not appropriate for hands-on inputs like a joystick; a moving average
 // would be more appropriate there.
-void updateWindows(ads1115_state * adc) {
-  uint16_t r, o;
 
+// Essentially, think of an interval: [X-WINDOW_L, X+WINDOW_H].
+// When we get a new read Y from the ADC, make the smallest possible update to X so that
+// this interval overlaps Y. Then use X as the value the device reports.
+uint16_t moveWindow(uint16_t prev, uint16_t next) {
+  uint16_t ret;
 #if DEBUG_WINDOWS
   static uint8_t ranFlag;
   if (ranFlag == 0) {
@@ -445,33 +491,36 @@ void updateWindows(ads1115_state * adc) {
     dprintf("WINDOW_SIZE: %d, WINDOW_L: %d, WINDOW_H %d", WINDOW_SIZE, WINDOW_L, WINDOW_H);
   }
 #endif
-  for (uint8_t i = 0; i < 4; ++i) {
-    r = adc->a[i];
-    o = adc->wa[i];
+  //  0 == UINT16_MIN
+  //   if prev isn't sitting against the low stop
+  //                            if the new value is definitely smaller.
+  if ((0 - WINDOW_L < prev) && (next < (prev + WINDOW_L))) {
+    ret = next - WINDOW_L;
 #if DEBUG_WINDOWS
-    dprintf("Read i=%d: r=%d, o=%d", i, r, o);
+    dprintf("Lower to %d", ret);
 #endif
+    return ret;
 
-    // if this would overflow/underflow, then no need to move window in respective direction.
-    // UINT16_MIN
-    if ((0 - WINDOW_L < o) && (r < (o + WINDOW_L))) {
-      adc->wa[i] = r - WINDOW_L;
+  }
+  //        if prev isn't sitting against the high stop
+  //                                  if the new value is difinitively larger
+  else if ((UINT16_MAX - WINDOW_H > prev) && (next > (prev + WINDOW_H))) {
+    ret = next - WINDOW_H;
 #if DEBUG_WINDOWS
-      dprintf("Lower to %d", adc->wa[i]);
+    dprintf("Raise to %d", ret);
 #endif
-    }
-    else if ((UINT16_MAX - WINDOW_H > o) && (r > (o + WINDOW_H))) {
-      adc->wa[i] = r - WINDOW_H;
-#if DEBUG_WINDOWS
-      dprintf("Raise to %d", adc->wa[i]);
-#endif
-    }
+    return ret;
+  }
+  else {
+    // prev falls into the pre-existing interval, so don't move it at all.
+    return prev;
   }
 }
 
+
 // Axes
 
-void joystickInit() {
+void initJoystick() {
 #if DEBUG
 #else
   //             autoSendState
@@ -555,15 +604,14 @@ void setup() {
   uint8_t err;
 
   dprintf("Preparing config...");
-  err = prepareAdc(&adc);
+  err = initAdc(&adc);
   if (err != 0) {
     return;
   }
   dprintf(bitConfigz(adc.config));
   dprintf(humanConfigz(adc.config));
 
-  joystickInit();
-
+  initJoystick();
   initMatrix(&pins, &matrix_state);
 
   dprintf("done");
@@ -573,10 +621,12 @@ void setup() {
 
 void loop() {
   uint8_t err;
+#if DEBUG
   static uint16_t last[4];
+#endif
 
   delay(20);
-  err = readAll(&adc);
+  err = readAdc(&adc);
   if (err != 0) {
     err = readConfig(&adc);
     if (err != 0) {
@@ -589,23 +639,23 @@ void loop() {
 
   for (uint8_t i = 0; i < 4; ++i) {
 #if DEBUG
-    if (adc.wa[i] != last[i]) {
-      dprintf("A%d:%d", i, adc.wa[i]);
-      last[i] = adc.wa[i];
+    if (adc.cur[i] != last[i]) {
+      dprintf("A%d:%d", i, adc.cur[i]);
+      last[i] = adc.cur[i];
     }
 #else
     switch (i) {
       case 0:
-        joystick.setXAxis((int32_t)adc.wa[i]);
+        joystick.setXAxis((int32_t)adc.cur[i]);
         break;
       case 1:
-        joystick.setYAxis((int32_t)adc.wa[i]);
+        joystick.setYAxis((int32_t)adc.cur[i]);
         break;
       case 2:
-        joystick.setZAxis((int32_t)adc.wa[i]);
+        joystick.setZAxis((int32_t)adc.cur[i]);
         break;
       case 3:
-        joystick.setRxAxis((int32_t)adc.wa[i]);
+        joystick.setRxAxis((int32_t)adc.cur[i]);
         break;
       default:
         dprintf("Impossible joystick index %d.", i);
