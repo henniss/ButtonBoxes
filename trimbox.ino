@@ -1,4 +1,4 @@
-#include <stdint.h>
+  #include <stdint.h>
 #include <stdarg.h>
 
 #include <Joystick.h>
@@ -27,6 +27,15 @@
 // Matrix specific defines.
 #define MAT_W 0x3
 #define MAT_H 0x3
+
+// in hz
+#define SAMPLE_FREQ 50
+#define SAMPLE_PERIOD_MS (1000/SAMPLE_FREQ)
+// Normally we don't send joystick updates unless something changes, but if >0, send additional 
+// updates ever COLD_UPDATE_MS miliseconds.
+#define COLD_UPDATE_MS 1000
+#define COLD_UPDATE_N (COLD_UPDATE_MS / SAMPLE_PERIOD_MS)
+#define COLD_UPDATE (COLD_UPDATE_PERIOD_MS > 0)
 
 // Forward Declarations.
 // Wouldn't normally be necessary, but arduino's IDE seems to sometimes insert these in the wrong place.
@@ -65,7 +74,7 @@ uint8_t readAdc(ads1115_state *adc);
 uint16_t moveWindow(uint16_t prev, uint16_t next);
 
 uint8_t initMatrix(const matrix_pins_t * pins, matrix_state_t * state);
-uint8_t scanMatrix(const matrix_pins_t * pins, matrix_state_t * state, void (*cb)(uint8_t code, uint8_t change));
+uint8_t scanMatrix(const matrix_pins_t * pins, matrix_state_t * state, void (*cb)(uint8_t code, uint8_t change), uint8_t * changed);
 void buttonChange(uint8_t code, uint8_t change);
 
 void initJoystick();
@@ -558,7 +567,7 @@ uint8_t initMatrix(const matrix_pins_t * pins, matrix_state_t * state) {
   return 0;
 }
 
-uint8_t scanMatrix(const matrix_pins_t * pins, matrix_state_t * state, void (*cb)(uint8_t code, uint8_t change)) {
+uint8_t scanMatrix(const matrix_pins_t * pins, matrix_state_t * state, void (*cb)(uint8_t code, uint8_t change), uint8_t *changed) {
   uint8_t code, value;
   if (pins == NULL) {
     dprintf("initMatrix(): Null pointer.");
@@ -577,6 +586,7 @@ uint8_t scanMatrix(const matrix_pins_t * pins, matrix_state_t * state, void (*cb
 #endif
       if ( value != state->s[code]) {
         (*cb)(code, value);
+        *changed = true;
         state->s[code] = (uint8_t)value;
       }
     }
@@ -620,12 +630,14 @@ void setup() {
 
 
 void loop() {
+  static uint8_t changed;
+  static uint8_t counter;
   uint8_t err;
 #if DEBUG
   static uint16_t last[4];
 #endif
 
-  delay(20);
+  delay(SAMPLE_PERIOD_MS);
   err = readAdc(&adc);
   if (err != 0) {
     err = readConfig(&adc);
@@ -640,6 +652,7 @@ void loop() {
   for (uint8_t i = 0; i < 4; ++i) {
 #if DEBUG
     if (adc.cur[i] != last[i]) {
+      changed = true;
       dprintf("A%d:%d", i, adc.cur[i]);
       last[i] = adc.cur[i];
     }
@@ -663,12 +676,17 @@ void loop() {
 #endif
   }
 
-  err = scanMatrix(&pins, &matrix_state, &buttonChange);
+  err = scanMatrix(&pins, &matrix_state, &buttonChange, &changed);
   if (err != 0) {
 #if DEBUG_MATRIX
     dprintf("scanMatrix(): error: %d", err);
 #endif
   }
 
-  joystick.sendState();
+  if (changed || !counter) {
+    dprintf("sendState()");
+    joystick.sendState();
+    changed = false;
+  }
+  counter = (counter + COLD_UPDATE_N - 1) % COLD_UPDATE_N;
 }
