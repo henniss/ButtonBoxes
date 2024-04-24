@@ -1,4 +1,12 @@
-  #include <stdint.h>
+/* Arduino code for my (many) button boxes.
+ * Copyright 2024 Harris Enniss. Licensed under the GNU GPL Version 3.
+ *
+ * This encorporates bits of Ben Buxton's rotary handler, available at https://github.com/buxtronix/arduino/tree/master/libraries/Rotary
+ *
+ * 
+ */
+
+#include <stdint.h>
 #include <stdarg.h>
 
 #include <Joystick.h>
